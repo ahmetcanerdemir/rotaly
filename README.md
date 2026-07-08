@@ -1,3 +1,11 @@
+# Rotaly
+
+Rotaly, insanların seyahate çıkmadan önce tüm maliyetlerini tek platformda planlayabildiği akıllı seyahat bütçe platformudur.
+
+Status: 🚧 In Development
+Started: 08.07.2026
+Founder: Ahmet Caner Demir
+
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
 ## Getting Started
