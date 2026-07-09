@@ -1,0 +1,157 @@
+// lib/tripCalculator.ts
+//
+// Rotaly'nin ana hesaplama motoru (orchestrator).
+//
+// Şimdilik sadece bir orkestrasyon katmanı: yakıt maliyetini gerçek
+// hesaplama modülünden (`lib/costs.ts`) alır, otel/yemek/aktivite/HGS
+// için mock değerler üretir ve hepsini tek bir `TripCalculationResult`
+// içinde birleştirir.
+//
+// UI'dan tamamen bağımsızdır — hiçbir React/Next.js importu yoktur,
+// bu yüzden herhangi bir test dosyasından veya API route'undan
+// doğrudan çağrılabilir. İleride hotel/food/activities/toll için de
+// gerçek hesaplama modülleri eklendiğinde, sadece bu dosyadaki mock
+// fonksiyonlar gerçek modül çağrılarıyla değiştirilecek; `calculateTrip`
+// imzası ve dönüş tipi aynı kalacak.
+
+import {
+  calculateFuelCost,
+  type FuelCalculationResult,
+  type FuelType,
+} from "./costs";
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface TripCalculationInput {
+  /** Tek yön mesafe (km). Yakıt hesaplamasına ve mock HGS hesabına girer. */
+  distanceKm: number;
+  fuelType: FuelType;
+  /** true ise mesafe/HGS otomatik gidiş-dönüş olarak hesaplanır. */
+  roundTrip?: boolean;
+  /** Kişi sayısı (otel/yemek/aktivite mock hesaplarında kullanılır). */
+  people: number;
+  /** Gün sayısı (otel/yemek/aktivite mock hesaplarında kullanılır). */
+  days: number;
+  /** İsteğe bağlı override'lar — verilmezse costs.ts varsayılanları kullanılır. */
+  consumptionPer100Km?: number;
+  pricePerUnit?: number;
+}
+
+export interface TripCostBreakdown {
+  fuel: FuelCalculationResult;
+  /** Şu an mock: people * days * sabit gecelik ücret. */
+  hotel: number;
+  /** Şu an mock: people * days * sabit günlük ücret. */
+  food: number;
+  /** Şu an mock: people * days * sabit günlük ücret. */
+  activities: number;
+  /** Şu an mock: toplam mesafe * sabit km ücreti (HGS). */
+  toll: number;
+}
+
+export interface TripCalculationResult {
+  input: TripCalculationInput;
+  breakdown: TripCostBreakdown;
+  totalCost: number;
+  currency: "TRY";
+}
+
+// ---------------------------------------------------------------------------
+// Mock değerler (hotel / food / activities / toll)
+//
+// Bu sabitler, mevcut calculator UI'ındaki (app/calculator/page.tsx)
+// tahmini bütçe formülleriyle aynı büyüklükte tutuldu, ama bu dosya
+// UI'dan bağımsız olduğu için oradan import edilmedi.
+// ---------------------------------------------------------------------------
+
+const MOCK_HOTEL_PRICE_PER_PERSON_PER_NIGHT = 1200;
+const MOCK_FOOD_PRICE_PER_PERSON_PER_DAY = 700;
+const MOCK_ACTIVITY_PRICE_PER_PERSON_PER_DAY = 600;
+const MOCK_TOLL_PRICE_PER_KM = 0.5;
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function calculateMockHotelCost(people: number, days: number): number {
+  return round2(people * days * MOCK_HOTEL_PRICE_PER_PERSON_PER_NIGHT);
+}
+
+function calculateMockFoodCost(people: number, days: number): number {
+  return round2(people * days * MOCK_FOOD_PRICE_PER_PERSON_PER_DAY);
+}
+
+function calculateMockActivitiesCost(people: number, days: number): number {
+  return round2(people * days * MOCK_ACTIVITY_PRICE_PER_PERSON_PER_DAY);
+}
+
+function calculateMockTollCost(distanceKm: number, roundTrip?: boolean): number {
+  const totalDistanceKm = roundTrip ? distanceKm * 2 : distanceKm;
+  return round2(totalDistanceKm * MOCK_TOLL_PRICE_PER_KM);
+}
+
+// ---------------------------------------------------------------------------
+// Validasyon
+// ---------------------------------------------------------------------------
+
+function assertPositiveInteger(value: number, fieldName: string): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${fieldName} sıfırdan büyük bir sayı olmalıdır.`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ana orchestrator fonksiyonu
+// ---------------------------------------------------------------------------
+
+/**
+ * Bir seyahatin toplam tahmini maliyetini hesaplar.
+ *
+ * Şu an için:
+ * - Yakıt maliyeti `calculateFuelCost` ile gerçek hesaplanır.
+ * - Otel / yemek / aktivite / HGS mock değerlerle hesaplanır.
+ *
+ * Saf bir fonksiyondur (dışarıdan hiçbir şey okumaz/yazmaz), bu yüzden
+ * kolayca unit test edilebilir. UI, sadece bu fonksiyonu çağırıp
+ * `TripCalculationResult`'ı ekrana yansıtacak; hesaplama mantığı burada.
+ */
+export function calculateTrip(
+  input: TripCalculationInput
+): TripCalculationResult {
+  assertPositiveInteger(input.people, "people");
+  assertPositiveInteger(input.days, "days");
+
+  const fuel = calculateFuelCost({
+    distanceKm: input.distanceKm,
+    fuelType: input.fuelType,
+    roundTrip: input.roundTrip,
+    consumptionPer100Km: input.consumptionPer100Km,
+    pricePerUnit: input.pricePerUnit,
+  });
+
+  const hotel = calculateMockHotelCost(input.people, input.days);
+  const food = calculateMockFoodCost(input.people, input.days);
+  const activities = calculateMockActivitiesCost(input.people, input.days);
+  const toll = calculateMockTollCost(input.distanceKm, input.roundTrip);
+
+  const breakdown: TripCostBreakdown = {
+    fuel,
+    hotel,
+    food,
+    activities,
+    toll,
+  };
+
+  const totalCost = round2(
+    fuel.totalCost + hotel + food + activities + toll
+  );
+
+  return {
+    input,
+    breakdown,
+    totalCost,
+    currency: "TRY",
+  };
+}
