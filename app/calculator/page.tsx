@@ -4,8 +4,10 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import ProgressBar from "../../components/ProgressBar";
 import CitySearchInput from "../../components/CitySearchInput";
 import VehicleSelector from "../../components/VehicleSelector";
+import TripResultSummary from "../../components/TripResultSummary";
 import { calculateTrip } from "../../lib/tripCalculator";
 import type { FuelType } from "../../lib/costs";
+import { getVehicleById } from "../../lib/vehicles";
 // TODO: Gerçek Google Maps entegrasyonu bağlandığında `MockMapsProvider`
 // yerine `lib/maps.ts`'teki `getMapsService()` (GoogleMapsProvider) kullanılacak.
 // `MapsProvider` arayüzü aynı kaldığı için aşağıdaki `fetchDistance` mantığının
@@ -152,9 +154,38 @@ export default function CalculatorPage() {
     [toCitySearch]
   );
 
+  const selectedTransport = useMemo(
+    () => transports.find((item) => item.id === transport),
+    [transport]
+  );
+
+  const vehicleLabel = useMemo(() => {
+    if (transport !== "car" || !vehicleId) {
+      return null;
+    }
+
+    const vehicle = getVehicleById(vehicleId);
+    return vehicle ? `${vehicle.brand} ${vehicle.model} ${vehicle.year}` : null;
+  }, [transport, vehicleId]);
+
+  const handleReset = useCallback(() => {
+    setStep(1);
+    setFromCity("");
+    setToCity("");
+    setTransport("");
+    setVehicleId("");
+    setPeople(2);
+    setDays(5);
+    invalidateDistance();
+  }, [invalidateDistance]);
+
   return (
     <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6">
-      <div className="w-full max-w-xl bg-slate-900 rounded-3xl p-10 shadow-2xl">
+      <div
+        className={`w-full bg-slate-900 rounded-3xl p-10 shadow-2xl ${
+          currentStepKey === "result" ? "max-w-2xl" : "max-w-xl"
+        }`}
+      >
         <p className="text-blue-400 font-semibold mb-2">
           Adım {step} / {totalSteps}
         </p>
@@ -384,20 +415,14 @@ export default function CalculatorPage() {
 
         {currentStepKey === "result" && (
           <>
-            <h1 className="text-4xl font-bold mb-3">Tahmini Tatil Maliyeti</h1>
-            <p className="text-gray-400 mb-8">
-              {fromCity} → {toCity} · {people} kişi · {days} gün
-              {distanceKm !== null ? ` · ${distanceKm} km` : ""}
-            </p>
-
             {isDistanceLoading && (
-              <div className="rounded-2xl bg-slate-800 p-6 mb-6 text-center text-gray-400">
+              <div className="rounded-2xl bg-slate-800 p-6 text-center text-gray-400">
                 Mesafe hesaplanıyor...
               </div>
             )}
 
             {!isDistanceLoading && distanceError && (
-              <div className="rounded-2xl bg-slate-800 border border-red-900 p-6 mb-6">
+              <div className="rounded-2xl bg-slate-800 border border-red-900 p-6">
                 <p className="text-red-400 font-semibold mb-3">{distanceError}</p>
                 <button
                   onClick={() => fetchDistance(fromCity, toCity)}
@@ -408,55 +433,19 @@ export default function CalculatorPage() {
               </div>
             )}
 
-            {!isDistanceLoading && !distanceError && trip && (
-              <>
-                <div className="rounded-2xl bg-slate-800 p-6 mb-6">
-                  <p className="text-gray-400 mb-2">Toplam Tahmini Bütçe</p>
-                  <p className="text-5xl font-bold text-blue-400">
-                    ₺{trip.totalCost.toLocaleString("tr-TR")}
-                  </p>
-                </div>
-
-                <div className="space-y-3 text-gray-300">
-                  <div className="flex justify-between">
-                    <span>⛽ Yakıt</span>
-                    <span>
-                      {transport === "car"
-                        ? `₺${trip.breakdown.fuel.totalCost.toLocaleString("tr-TR")}`
-                        : "Yakıt hesaplanmadı"}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>🏨 Konaklama</span>
-                    <span>₺{trip.breakdown.hotel.toLocaleString("tr-TR")}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>🍽️ Yemek</span>
-                    <span>₺{trip.breakdown.food.toLocaleString("tr-TR")}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>🎯 Aktivite</span>
-                    <span>₺{trip.breakdown.activities.toLocaleString("tr-TR")}</span>
-                  </div>
-                </div>
-              </>
+            {!isDistanceLoading && !distanceError && trip && distanceKm !== null && (
+              <TripResultSummary
+                fromCity={fromCity}
+                toCity={toCity}
+                distanceKm={distanceKm}
+                isCar={transport === "car"}
+                transportLabel={selectedTransport?.label ?? ""}
+                transportIcon={selectedTransport?.emoji ?? ""}
+                vehicleLabel={vehicleLabel}
+                trip={trip}
+                onReset={handleReset}
+              />
             )}
-
-            <button
-              onClick={() => {
-                setStep(1);
-                setFromCity("");
-                setToCity("");
-                setTransport("");
-                setVehicleId("");
-                setPeople(2);
-                setDays(5);
-                invalidateDistance();
-              }}
-              className="mt-8 w-full bg-slate-800 hover:bg-slate-700 rounded-xl py-4 font-semibold text-lg transition"
-            >
-              Yeni Hesaplama Yap
-            </button>
           </>
         )}
 
