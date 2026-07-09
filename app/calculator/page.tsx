@@ -1,11 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import ProgressBar from "../../components/ProgressBar";
 import CitySearchInput from "../../components/CitySearchInput";
 import VehicleSelector from "../../components/VehicleSelector";
 import { calculateTrip } from "../../lib/tripCalculator";
 import type { FuelType } from "../../lib/costs";
+// TODO: Gerçek Google Maps entegrasyonu bağlandığında `MockMapsProvider`
+// yerine `lib/maps.ts`'teki `getMapsService()` (GoogleMapsProvider) kullanılacak.
+// `MapsProvider` arayüzü aynı kaldığı için aşağıdaki `fetchDistance` mantığının
+// değişmesi gerekmeyecek.
+import { MockMapsProvider } from "../../lib/maps";
 
 const cities = [
   "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Amasya",
@@ -43,10 +48,10 @@ function filterCities(cityList: string[], query: string) {
   return cityList.filter((city) => normalize(city).includes(normalizedQuery));
 }
 
-// TODO: Google Maps entegrasyonu bağlandığında gerçek mesafeyle değiştirilecek.
-const MOCK_DISTANCE_KM = 695;
 // TODO: Araç seçilmediğinde kullanılacak varsayılan yakıt tipi.
 const MOCK_FUEL_TYPE: FuelType = "gasoline";
+
+const mapsProvider = new MockMapsProvider();
 
 // Adım sırası, ulaşım türüne göre değişir: "car" seçilirse "vehicle" adımı
 // devreye girer, aksi halde tamamen atlanır. Bu sayede step numaraları
@@ -81,22 +86,61 @@ export default function CalculatorPage() {
   const [days, setDays] = useState(5);
   const [fromCitySearch, setFromCitySearch] = useState("");
   const [toCitySearch, setToCitySearch] = useState("");
+  const [distanceKm, setDistanceKm] = useState<number | null>(null);
+  const [isDistanceLoading, setIsDistanceLoading] = useState(false);
+  const [distanceError, setDistanceError] = useState<string | null>(null);
 
   const stepSequence = useMemo(() => getStepSequence(transport), [transport]);
   const totalSteps = stepSequence.length;
   const currentStepKey = stepSequence[Math.min(step, totalSteps) - 1];
 
-  const trip = useMemo(
-    () =>
-      calculateTrip({
-        distanceKm: MOCK_DISTANCE_KM,
-        fuelType: MOCK_FUEL_TYPE,
-        people,
-        days,
-        vehicleId: transport === "car" && vehicleId ? vehicleId : undefined,
-      }),
-    [people, days, transport, vehicleId]
-  );
+  // Mesafe, hedef şehir seçilir seçilmez (toCity onClick'inde) tetiklenir —
+  // bir useEffect yerine doğrudan event handler'dan çağrılır ki state
+  // güncellemeleri her zaman taze origin/destination değerleriyle yapılsın.
+  // `distanceRequestId`, kullanıcı hızlıca şehir değiştirirse eski (stale)
+  // bir cevabın daha yeni bir seçimin üzerine yazmasını engeller.
+  const distanceRequestId = useRef(0);
+
+  const invalidateDistance = useCallback(() => {
+    distanceRequestId.current += 1;
+    setDistanceKm(null);
+    setDistanceError(null);
+    setIsDistanceLoading(false);
+  }, []);
+
+  const fetchDistance = useCallback(async (origin: string, destination: string) => {
+    const requestId = ++distanceRequestId.current;
+    setIsDistanceLoading(true);
+    setDistanceError(null);
+    setDistanceKm(null);
+
+    try {
+      const result = await mapsProvider.getDistance({ origin, destination });
+      if (distanceRequestId.current !== requestId) return;
+      setDistanceKm(Math.round(result.distanceMeters / 1000));
+    } catch {
+      if (distanceRequestId.current !== requestId) return;
+      setDistanceError("Mesafe hesaplanamadı. Lütfen tekrar deneyin.");
+    } finally {
+      if (distanceRequestId.current === requestId) {
+        setIsDistanceLoading(false);
+      }
+    }
+  }, []);
+
+  const trip = useMemo(() => {
+    if (distanceKm === null) {
+      return null;
+    }
+
+    return calculateTrip({
+      distanceKm,
+      fuelType: MOCK_FUEL_TYPE,
+      people,
+      days,
+      vehicleId: transport === "car" && vehicleId ? vehicleId : undefined,
+    });
+  }, [distanceKm, people, days, transport, vehicleId]);
 
   const filteredFromCities = useMemo(
     () => filterCities(cities, fromCitySearch),
@@ -131,7 +175,14 @@ export default function CalculatorPage() {
                 filteredFromCities.map((city) => (
                   <button
                     key={city}
-                    onClick={() => setFromCity(city)}
+                    onClick={() => {
+                      setFromCity(city);
+                      // Başlangıç şehri değişince eski hedef/mesafe artık
+                      // geçersiz olabilir; kullanıcı hedefi yeniden seçince
+                      // fetchDistance tekrar tetiklenir.
+                      setToCity("");
+                      invalidateDistance();
+                    }}
                     className={`rounded-xl border p-3 transition ${
                       fromCity === city
                         ? "bg-blue-600 border-blue-600"
@@ -176,7 +227,10 @@ export default function CalculatorPage() {
                 filteredToCities.map((city) => (
                   <button
                     key={city}
-                    onClick={() => setToCity(city)}
+                    onClick={() => {
+                      setToCity(city);
+                      fetchDistance(fromCity, city);
+                    }}
                     disabled={city === fromCity}
                     className={`rounded-xl border p-3 transition ${
                       toCity === city
@@ -333,37 +387,60 @@ export default function CalculatorPage() {
             <h1 className="text-4xl font-bold mb-3">Tahmini Tatil Maliyeti</h1>
             <p className="text-gray-400 mb-8">
               {fromCity} → {toCity} · {people} kişi · {days} gün
+              {distanceKm !== null ? ` · ${distanceKm} km` : ""}
             </p>
 
-            <div className="rounded-2xl bg-slate-800 p-6 mb-6">
-              <p className="text-gray-400 mb-2">Toplam Tahmini Bütçe</p>
-              <p className="text-5xl font-bold text-blue-400">
-                ₺{trip.totalCost.toLocaleString("tr-TR")}
-              </p>
-            </div>
+            {isDistanceLoading && (
+              <div className="rounded-2xl bg-slate-800 p-6 mb-6 text-center text-gray-400">
+                Mesafe hesaplanıyor...
+              </div>
+            )}
 
-            <div className="space-y-3 text-gray-300">
-              <div className="flex justify-between">
-                <span>⛽ Yakıt</span>
-                <span>
-                  {transport === "car"
-                    ? `₺${trip.breakdown.fuel.totalCost.toLocaleString("tr-TR")}`
-                    : "Yakıt hesaplanmadı"}
-                </span>
+            {!isDistanceLoading && distanceError && (
+              <div className="rounded-2xl bg-slate-800 border border-red-900 p-6 mb-6">
+                <p className="text-red-400 font-semibold mb-3">{distanceError}</p>
+                <button
+                  onClick={() => fetchDistance(fromCity, toCity)}
+                  className="text-sm text-gray-300 hover:text-white transition underline"
+                >
+                  Tekrar dene
+                </button>
               </div>
-              <div className="flex justify-between">
-                <span>🏨 Konaklama</span>
-                <span>₺{trip.breakdown.hotel.toLocaleString("tr-TR")}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>🍽️ Yemek</span>
-                <span>₺{trip.breakdown.food.toLocaleString("tr-TR")}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>🎯 Aktivite</span>
-                <span>₺{trip.breakdown.activities.toLocaleString("tr-TR")}</span>
-              </div>
-            </div>
+            )}
+
+            {!isDistanceLoading && !distanceError && trip && (
+              <>
+                <div className="rounded-2xl bg-slate-800 p-6 mb-6">
+                  <p className="text-gray-400 mb-2">Toplam Tahmini Bütçe</p>
+                  <p className="text-5xl font-bold text-blue-400">
+                    ₺{trip.totalCost.toLocaleString("tr-TR")}
+                  </p>
+                </div>
+
+                <div className="space-y-3 text-gray-300">
+                  <div className="flex justify-between">
+                    <span>⛽ Yakıt</span>
+                    <span>
+                      {transport === "car"
+                        ? `₺${trip.breakdown.fuel.totalCost.toLocaleString("tr-TR")}`
+                        : "Yakıt hesaplanmadı"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>🏨 Konaklama</span>
+                    <span>₺{trip.breakdown.hotel.toLocaleString("tr-TR")}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>🍽️ Yemek</span>
+                    <span>₺{trip.breakdown.food.toLocaleString("tr-TR")}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>🎯 Aktivite</span>
+                    <span>₺{trip.breakdown.activities.toLocaleString("tr-TR")}</span>
+                  </div>
+                </div>
+              </>
+            )}
 
             <button
               onClick={() => {
@@ -374,6 +451,7 @@ export default function CalculatorPage() {
                 setVehicleId("");
                 setPeople(2);
                 setDays(5);
+                invalidateDistance();
               }}
               className="mt-8 w-full bg-slate-800 hover:bg-slate-700 rounded-xl py-4 font-semibold text-lg transition"
             >

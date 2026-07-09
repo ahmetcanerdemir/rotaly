@@ -186,18 +186,58 @@ export function parseDistanceMatrixResponse(
 }
 
 // ---------------------------------------------------------------------------
-// Mock provider — offline geliştirme ve test için
+// Mock provider — gerçek API bağlanana kadar calculator akışını besler
 // ---------------------------------------------------------------------------
+//
+// `app/calculator/page.tsx` şu an bu sınıfı doğrudan kullanıyor (bkz. o
+// dosyadaki TODO). Gerçekçi bir demo/geliştirme deneyimi için 0 yerine,
+// şehir çiftine göre deterministik (her zaman aynı iki şehir için aynı
+// sonucu veren) bir mesafe üretir ve gerçek bir ağ çağrısını simüle etmek
+// için kısa bir gecikme ekler.
+
+function estimateMockDistanceKm(origin: string, destination: string): number {
+  const seed = `${origin}-${destination}`
+    .split("")
+    .reduce((total, char) => total + char.charCodeAt(0), 0);
+
+  // 80 km – 900 km aralığında, aynı şehir çifti için hep aynı değeri
+  // üreten basit bir mock formül.
+  return 80 + (seed % 820);
+}
+
+function formatMockDuration(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.round((totalSeconds % 3600) / 60);
+
+  if (hours <= 0) {
+    return `${minutes} dk`;
+  }
+
+  return `${hours} saat ${minutes} dk`;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export class MockMapsProvider implements MapsProvider {
   async getDistance(request: DistanceRequest): Promise<DistanceResult> {
+    // Gerçek bir API çağrısının gecikmesini simüle eder; loading durumunun
+    // UI'da gözlemlenebilmesi için bilerek eklendi.
+    await wait(500);
+
+    const distanceKm = estimateMockDistanceKm(request.origin, request.destination);
+    const distanceMeters = distanceKm * 1000;
+    const averageSpeedKmh = 80;
+    const durationSeconds = Math.round((distanceKm / averageSpeedKmh) * 3600);
+
     return {
       origin: request.origin,
       destination: request.destination,
-      distanceMeters: 0,
-      distanceText: "—",
-      durationSeconds: 0,
-      durationText: "—",
+      distanceMeters,
+      distanceText: `${distanceKm} km`,
+      durationSeconds,
+      durationText: formatMockDuration(durationSeconds),
       isMocked: true,
     };
   }
