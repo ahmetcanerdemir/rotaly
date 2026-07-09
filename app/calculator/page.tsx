@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import ProgressBar from "../../components/ProgressBar";
 
 const cities = [
   "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Amasya",
@@ -117,7 +118,11 @@ export default function CalculatorPage() {
             </p>
 
             <button
-              onClick={() => setStep(1)}
+              onClick={() => {
+                setStep(1);
+                setFromCity("");
+                setToCity("");
+              }}
               className="w-full bg-slate-800 hover:bg-slate-700 rounded-xl py-4 font-semibold text-lg transition"
             >
               Başa Dön
@@ -125,19 +130,7 @@ export default function CalculatorPage() {
           </>
         )}
 
-        <div className="mt-10">
-          <div className="flex justify-between text-sm text-gray-400 mb-2">
-            <span>İlerleme</span>
-            <span>%{Math.round((step / 6) * 100)}</span>
-          </div>
-
-          <div className="w-full h-3 rounded-full bg-slate-800">
-            <div
-              className="h-3 rounded-full bg-blue-500 transition-all"
-              style={{ width: `${(step / 6) * 100}%` }}
-            />
-          </div>
-        </div>
+        <ProgressBar step={step} totalSteps={6} />
       </div>
     </main>
   );
