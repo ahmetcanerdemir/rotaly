@@ -24,10 +24,18 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
+export type TransportType = "car" | "plane" | "bus" | "train";
+
 export interface TripCalculationInput {
   /** Tek yön mesafe (km). Yakıt hesaplamasına ve mock HGS hesabına girer. */
   distanceKm: number;
   fuelType: FuelType;
+  /**
+   * Ulaşım türü. "car" dışındaki türlerde yakıt maliyeti (ve tüketimi)
+   * sıfırlanır — kendi aracıyla gitmeyen kullanıcı için yakıt gideri
+   * anlamsızdır. Verilmezse geriye dönük uyumluluk için "car" varsayılır.
+   */
+  transportType?: TransportType;
   /** true ise mesafe/HGS otomatik gidiş-dönüş olarak hesaplanır. */
   roundTrip?: boolean;
   /** Kişi sayısı (otel/yemek/aktivite mock hesaplarında kullanılır). */
@@ -123,13 +131,23 @@ export function calculateTrip(
   assertPositiveInteger(input.people, "people");
   assertPositiveInteger(input.days, "days");
 
-  const fuel = calculateFuelCost({
+  const transportType: TransportType = input.transportType ?? "car";
+
+  const fuelResult = calculateFuelCost({
     distanceKm: input.distanceKm,
     fuelType: input.fuelType,
     roundTrip: input.roundTrip,
     consumptionPer100Km: input.consumptionPer100Km,
     pricePerUnit: input.pricePerUnit,
   });
+
+  // Kendi aracıyla gidilmiyorsa (uçak/otobüs/tren) yakıt maliyeti/tüketimi
+  // yok sayılır. `calculateFuelCost` yine de çağrılır (mimari korunur),
+  // sadece sonuç burada sıfırlanır.
+  const fuel: FuelCalculationResult =
+    transportType === "car"
+      ? fuelResult
+      : { ...fuelResult, totalCost: 0, totalUnitsConsumed: 0 };
 
   const hotel = calculateMockHotelCost(input.people, input.days);
   const food = calculateMockFoodCost(input.people, input.days);

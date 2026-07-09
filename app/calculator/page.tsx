@@ -1,7 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import ProgressBar from "../../components/ProgressBar";
+import CitySearchInput from "../../components/CitySearchInput";
+import { calculateTrip } from "../../lib/tripCalculator";
+import type { FuelType } from "../../lib/costs";
 
 const cities = [
   "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Amasya",
@@ -29,6 +32,21 @@ const transports = [
   { id: "train", label: "Tren", emoji: "🚆" },
 ];
 
+function normalize(value: string) {
+  return value.toLocaleLowerCase("tr-TR").trim();
+}
+
+function filterCities(cityList: string[], query: string) {
+  const normalizedQuery = normalize(query);
+  if (!normalizedQuery) return cityList;
+  return cityList.filter((city) => normalize(city).includes(normalizedQuery));
+}
+
+// TODO: Google Maps entegrasyonu bağlandığında gerçek mesafeyle değiştirilecek.
+const MOCK_DISTANCE_KM = 695;
+// TODO: Ulaşım/araç seçimine göre gerçek yakıt tipi seçilecek.
+const MOCK_FUEL_TYPE: FuelType = "gasoline";
+
 export default function CalculatorPage() {
   const [step, setStep] = useState(1);
   const [fromCity, setFromCity] = useState("");
@@ -36,8 +54,29 @@ export default function CalculatorPage() {
   const [transport, setTransport] = useState("");
   const [people, setPeople] = useState(2);
   const [days, setDays] = useState(5);
+  const [fromCitySearch, setFromCitySearch] = useState("");
+  const [toCitySearch, setToCitySearch] = useState("");
 
-  const estimatedTotal = people * days * 2500;
+  const trip = useMemo(
+    () =>
+      calculateTrip({
+        distanceKm: MOCK_DISTANCE_KM,
+        fuelType: MOCK_FUEL_TYPE,
+        people,
+        days,
+      }),
+    [people, days]
+  );
+
+  const filteredFromCities = useMemo(
+    () => filterCities(cities, fromCitySearch),
+    [fromCitySearch]
+  );
+
+  const filteredToCities = useMemo(
+    () => filterCities(cities, toCitySearch),
+    [toCitySearch]
+  );
 
   return (
     <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6">
@@ -49,20 +88,32 @@ export default function CalculatorPage() {
             <h1 className="text-4xl font-bold mb-3">Nereden çıkıyorsunuz?</h1>
             <p className="text-gray-400 mb-6">Başlangıç şehrinizi seçin.</p>
 
+            <CitySearchInput
+              value={fromCitySearch}
+              onChange={setFromCitySearch}
+              placeholder="Şehir ara..."
+            />
+
             <div className="grid grid-cols-2 gap-3 max-h-72 overflow-y-auto pr-2">
-              {cities.map((city) => (
-                <button
-                  key={city}
-                  onClick={() => setFromCity(city)}
-                  className={`rounded-xl border p-3 transition ${
-                    fromCity === city
-                      ? "bg-blue-600 border-blue-600"
-                      : "bg-slate-800 border-slate-700 hover:border-blue-500"
-                  }`}
-                >
-                  {city}
-                </button>
-              ))}
+              {filteredFromCities.length > 0 ? (
+                filteredFromCities.map((city) => (
+                  <button
+                    key={city}
+                    onClick={() => setFromCity(city)}
+                    className={`rounded-xl border p-3 transition ${
+                      fromCity === city
+                        ? "bg-blue-600 border-blue-600"
+                        : "bg-slate-800 border-slate-700 hover:border-blue-500"
+                    }`}
+                  >
+                    {city}
+                  </button>
+                ))
+              ) : (
+                <p className="col-span-2 py-6 text-center text-gray-500">
+                  &ldquo;{fromCitySearch}&rdquo; için sonuç bulunamadı.
+                </p>
+              )}
             </div>
 
             <button
@@ -82,23 +133,35 @@ export default function CalculatorPage() {
             <h1 className="text-4xl font-bold mb-3">Nereye gidiyorsunuz?</h1>
             <p className="text-gray-400 mb-6">Başlangıç: {fromCity}</p>
 
+            <CitySearchInput
+              value={toCitySearch}
+              onChange={setToCitySearch}
+              placeholder="Şehir ara..."
+            />
+
             <div className="grid grid-cols-2 gap-3 max-h-72 overflow-y-auto pr-2">
-              {cities.map((city) => (
-                <button
-                  key={city}
-                  onClick={() => setToCity(city)}
-                  disabled={city === fromCity}
-                  className={`rounded-xl border p-3 transition ${
-                    toCity === city
-                      ? "bg-blue-600 border-blue-600"
-                      : city === fromCity
-                      ? "bg-slate-800 border-slate-800 text-gray-600 cursor-not-allowed"
-                      : "bg-slate-800 border-slate-700 hover:border-blue-500"
-                  }`}
-                >
-                  {city}
-                </button>
-              ))}
+              {filteredToCities.length > 0 ? (
+                filteredToCities.map((city) => (
+                  <button
+                    key={city}
+                    onClick={() => setToCity(city)}
+                    disabled={city === fromCity}
+                    className={`rounded-xl border p-3 transition ${
+                      toCity === city
+                        ? "bg-blue-600 border-blue-600"
+                        : city === fromCity
+                        ? "bg-slate-800 border-slate-800 text-gray-600 cursor-not-allowed"
+                        : "bg-slate-800 border-slate-700 hover:border-blue-500"
+                    }`}
+                  >
+                    {city}
+                  </button>
+                ))
+              ) : (
+                <p className="col-span-2 py-6 text-center text-gray-500">
+                  &ldquo;{toCitySearch}&rdquo; için sonuç bulunamadı.
+                </p>
+              )}
             </div>
 
             <button
@@ -217,22 +280,30 @@ export default function CalculatorPage() {
             <div className="rounded-2xl bg-slate-800 p-6 mb-6">
               <p className="text-gray-400 mb-2">Toplam Tahmini Bütçe</p>
               <p className="text-5xl font-bold text-blue-400">
-                ₺{estimatedTotal.toLocaleString("tr-TR")}
+                ₺{trip.totalCost.toLocaleString("tr-TR")}
               </p>
             </div>
 
             <div className="space-y-3 text-gray-300">
               <div className="flex justify-between">
+                <span>⛽ Yakıt</span>
+                <span>
+                  {transport === "car"
+                    ? `₺${trip.breakdown.fuel.totalCost.toLocaleString("tr-TR")}`
+                    : "Yakıt hesaplanmadı"}
+                </span>
+              </div>
+              <div className="flex justify-between">
                 <span>🏨 Konaklama</span>
-                <span>₺{(days * people * 1200).toLocaleString("tr-TR")}</span>
+                <span>₺{trip.breakdown.hotel.toLocaleString("tr-TR")}</span>
               </div>
               <div className="flex justify-between">
                 <span>🍽️ Yemek</span>
-                <span>₺{(days * people * 700).toLocaleString("tr-TR")}</span>
+                <span>₺{trip.breakdown.food.toLocaleString("tr-TR")}</span>
               </div>
               <div className="flex justify-between">
                 <span>🎯 Aktivite</span>
-                <span>₺{(days * people * 600).toLocaleString("tr-TR")}</span>
+                <span>₺{trip.breakdown.activities.toLocaleString("tr-TR")}</span>
               </div>
             </div>
 
@@ -264,4 +335,5 @@ export default function CalculatorPage() {
         <ProgressBar step={step} totalSteps={6} />
       </div>
     </main>
-  )
+  );
+}
