@@ -19,6 +19,7 @@ import {
   type FuelCalculationResult,
   type FuelType,
 } from "./costs";
+import { getVehicleById } from "./vehicles";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,6 +31,15 @@ export interface TripCalculationInput {
   /** Tek yön mesafe (km). Yakıt hesaplamasına ve mock HGS hesabına girer. */
   distanceKm: number;
   fuelType: FuelType;
+  /**
+   * İsteğe bağlı: `lib/vehicles.ts` kataloğundan bir araç kimliği
+   * (`Vehicle.id`). Verilirse aracın `fuelType` ve `consumptionPer100Km`
+   * değerleri, bu input'taki `fuelType`/`consumptionPer100Km` alanlarının
+   * YERİNE kullanılır (araç bilgisi önceliklidir). Verilmezse mevcut
+   * `fuelType`/`consumptionPer100Km` mantığı aynen çalışır. Katalogda
+   * bulunamayan bir id verilirse `calculateTrip` net bir `Error` fırlatır.
+   */
+  vehicleId?: string;
   /**
    * Ulaşım türü. "car" dışındaki türlerde yakıt maliyeti (ve tüketimi)
    * sıfırlanır — kendi aracıyla gitmeyen kullanıcı için yakıt gideri
@@ -111,6 +121,44 @@ function assertPositiveInteger(value: number, fieldName: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Araç kataloğu entegrasyonu
+// ---------------------------------------------------------------------------
+
+interface ResolvedFuelParams {
+  fuelType: FuelType;
+  consumptionPer100Km?: number;
+}
+
+/**
+ * `vehicleId` verilmişse `lib/vehicles.ts` kataloğundan aracı bulup
+ * fuelType/consumptionPer100Km değerlerini oradan döner. Araç
+ * bulunamazsa net bir `Error` fırlatır. `vehicleId` verilmemişse
+ * input'taki mevcut fuelType/consumptionPer100Km aynen kullanılır
+ * (geriye dönük uyumluluk).
+ */
+function resolveFuelParams(input: TripCalculationInput): ResolvedFuelParams {
+  if (!input.vehicleId) {
+    return {
+      fuelType: input.fuelType,
+      consumptionPer100Km: input.consumptionPer100Km,
+    };
+  }
+
+  const vehicle = getVehicleById(input.vehicleId);
+
+  if (!vehicle) {
+    throw new Error(
+      `"${input.vehicleId}" kimlikli araç bulunamadı. lib/vehicles.ts kataloğunda kayıtlı bir vehicleId kullanın.`
+    );
+  }
+
+  return {
+    fuelType: vehicle.fuelType,
+    consumptionPer100Km: vehicle.consumptionPer100Km,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Ana orchestrator fonksiyonu
 // ---------------------------------------------------------------------------
 
@@ -132,12 +180,13 @@ export function calculateTrip(
   assertPositiveInteger(input.days, "days");
 
   const transportType: TransportType = input.transportType ?? "car";
+  const { fuelType, consumptionPer100Km } = resolveFuelParams(input);
 
   const fuelResult = calculateFuelCost({
     distanceKm: input.distanceKm,
-    fuelType: input.fuelType,
+    fuelType,
     roundTrip: input.roundTrip,
-    consumptionPer100Km: input.consumptionPer100Km,
+    consumptionPer100Km,
     pricePerUnit: input.pricePerUnit,
   });
 

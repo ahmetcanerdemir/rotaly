@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import ProgressBar from "../../components/ProgressBar";
 import CitySearchInput from "../../components/CitySearchInput";
+import VehicleSelector from "../../components/VehicleSelector";
 import { calculateTrip } from "../../lib/tripCalculator";
 import type { FuelType } from "../../lib/costs";
 
@@ -44,18 +45,46 @@ function filterCities(cityList: string[], query: string) {
 
 // TODO: Google Maps entegrasyonu bağlandığında gerçek mesafeyle değiştirilecek.
 const MOCK_DISTANCE_KM = 695;
-// TODO: Ulaşım/araç seçimine göre gerçek yakıt tipi seçilecek.
+// TODO: Araç seçilmediğinde kullanılacak varsayılan yakıt tipi.
 const MOCK_FUEL_TYPE: FuelType = "gasoline";
+
+// Adım sırası, ulaşım türüne göre değişir: "car" seçilirse "vehicle" adımı
+// devreye girer, aksi halde tamamen atlanır. Bu sayede step numaraları
+// sabit kalmak zorunda kalmadan akış dinamik olarak kurulur.
+type StepKey =
+  | "fromCity"
+  | "toCity"
+  | "transport"
+  | "vehicle"
+  | "people"
+  | "days"
+  | "result";
+
+function getStepSequence(transport: string): StepKey[] {
+  const sequence: StepKey[] = ["fromCity", "toCity", "transport"];
+
+  if (transport === "car") {
+    sequence.push("vehicle");
+  }
+
+  sequence.push("people", "days", "result");
+  return sequence;
+}
 
 export default function CalculatorPage() {
   const [step, setStep] = useState(1);
   const [fromCity, setFromCity] = useState("");
   const [toCity, setToCity] = useState("");
   const [transport, setTransport] = useState("");
+  const [vehicleId, setVehicleId] = useState("");
   const [people, setPeople] = useState(2);
   const [days, setDays] = useState(5);
   const [fromCitySearch, setFromCitySearch] = useState("");
   const [toCitySearch, setToCitySearch] = useState("");
+
+  const stepSequence = useMemo(() => getStepSequence(transport), [transport]);
+  const totalSteps = stepSequence.length;
+  const currentStepKey = stepSequence[Math.min(step, totalSteps) - 1];
 
   const trip = useMemo(
     () =>
@@ -64,8 +93,9 @@ export default function CalculatorPage() {
         fuelType: MOCK_FUEL_TYPE,
         people,
         days,
+        vehicleId: transport === "car" && vehicleId ? vehicleId : undefined,
       }),
-    [people, days]
+    [people, days, transport, vehicleId]
   );
 
   const filteredFromCities = useMemo(
@@ -81,9 +111,11 @@ export default function CalculatorPage() {
   return (
     <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6">
       <div className="w-full max-w-xl bg-slate-900 rounded-3xl p-10 shadow-2xl">
-        <p className="text-blue-400 font-semibold mb-2">Adım {step} / 6</p>
+        <p className="text-blue-400 font-semibold mb-2">
+          Adım {step} / {totalSteps}
+        </p>
 
-        {step === 1 && (
+        {currentStepKey === "fromCity" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Nereden çıkıyorsunuz?</h1>
             <p className="text-gray-400 mb-6">Başlangıç şehrinizi seçin.</p>
@@ -117,7 +149,7 @@ export default function CalculatorPage() {
             </div>
 
             <button
-              onClick={() => setStep(2)}
+              onClick={() => setStep((s) => s + 1)}
               disabled={!fromCity}
               className={`mt-8 w-full rounded-xl py-4 font-semibold text-lg transition ${
                 fromCity ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-700 cursor-not-allowed text-gray-400"
@@ -128,7 +160,7 @@ export default function CalculatorPage() {
           </>
         )}
 
-        {step === 2 && (
+        {currentStepKey === "toCity" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Nereye gidiyorsunuz?</h1>
             <p className="text-gray-400 mb-6">Başlangıç: {fromCity}</p>
@@ -165,7 +197,7 @@ export default function CalculatorPage() {
             </div>
 
             <button
-              onClick={() => setStep(3)}
+              onClick={() => setStep((s) => s + 1)}
               disabled={!toCity}
               className={`mt-8 w-full rounded-xl py-4 font-semibold text-lg transition ${
                 toCity ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-700 cursor-not-allowed text-gray-400"
@@ -176,7 +208,7 @@ export default function CalculatorPage() {
           </>
         )}
 
-        {step === 3 && (
+        {currentStepKey === "transport" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Nasıl gideceksiniz?</h1>
             <p className="text-gray-400 mb-6">{fromCity} → {toCity}</p>
@@ -185,7 +217,12 @@ export default function CalculatorPage() {
               {transports.map((item) => (
                 <button
                   key={item.id}
-                  onClick={() => setTransport(item.id)}
+                  onClick={() => {
+                    setTransport(item.id);
+                    if (item.id !== "car") {
+                      setVehicleId("");
+                    }
+                  }}
                   className={`rounded-2xl border p-6 transition ${
                     transport === item.id
                       ? "bg-blue-600 border-blue-600"
@@ -199,7 +236,7 @@ export default function CalculatorPage() {
             </div>
 
             <button
-              onClick={() => setStep(4)}
+              onClick={() => setStep((s) => s + 1)}
               disabled={!transport}
               className={`mt-8 w-full rounded-xl py-4 font-semibold text-lg transition ${
                 transport ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-700 cursor-not-allowed text-gray-400"
@@ -210,7 +247,28 @@ export default function CalculatorPage() {
           </>
         )}
 
-        {step === 4 && (
+        {currentStepKey === "vehicle" && (
+          <>
+            <h1 className="text-4xl font-bold mb-3">Aracınızı seçin</h1>
+            <p className="text-gray-400 mb-6">
+              Yakıt maliyeti hesaplaması için önce marka, sonra araç seçin.
+            </p>
+
+            <VehicleSelector selectedVehicleId={vehicleId} onSelect={setVehicleId} />
+
+            <button
+              onClick={() => setStep((s) => s + 1)}
+              disabled={!vehicleId}
+              className={`mt-8 w-full rounded-xl py-4 font-semibold text-lg transition ${
+                vehicleId ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-700 cursor-not-allowed text-gray-400"
+              }`}
+            >
+              Devam →
+            </button>
+          </>
+        )}
+
+        {currentStepKey === "people" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Kaç kişisiniz?</h1>
             <p className="text-gray-400 mb-6">Kişi sayısını seçin.</p>
@@ -232,7 +290,7 @@ export default function CalculatorPage() {
             </div>
 
             <button
-              onClick={() => setStep(5)}
+              onClick={() => setStep((s) => s + 1)}
               className="mt-8 w-full bg-blue-600 hover:bg-blue-700 rounded-xl py-4 font-semibold text-lg transition"
             >
               Devam →
@@ -240,7 +298,7 @@ export default function CalculatorPage() {
           </>
         )}
 
-        {step === 5 && (
+        {currentStepKey === "days" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Kaç gün kalacaksınız?</h1>
             <p className="text-gray-400 mb-6">Tatil süresini seçin.</p>
@@ -262,7 +320,7 @@ export default function CalculatorPage() {
             </div>
 
             <button
-              onClick={() => setStep(6)}
+              onClick={() => setStep((s) => s + 1)}
               className="mt-8 w-full bg-blue-600 hover:bg-blue-700 rounded-xl py-4 font-semibold text-lg transition"
             >
               Sonucu Gör →
@@ -270,7 +328,7 @@ export default function CalculatorPage() {
           </>
         )}
 
-        {step === 6 && (
+        {currentStepKey === "result" && (
           <>
             <h1 className="text-4xl font-bold mb-3">Tahmini Tatil Maliyeti</h1>
             <p className="text-gray-400 mb-8">
@@ -313,6 +371,7 @@ export default function CalculatorPage() {
                 setFromCity("");
                 setToCity("");
                 setTransport("");
+                setVehicleId("");
                 setPeople(2);
                 setDays(5);
               }}
@@ -325,14 +384,14 @@ export default function CalculatorPage() {
 
         {step > 1 && (
           <button
-            onClick={() => setStep(step - 1)}
+            onClick={() => setStep((s) => s - 1)}
             className="mt-6 w-full text-gray-400 hover:text-white transition"
           >
             ← Geri
           </button>
         )}
 
-        <ProgressBar step={step} totalSteps={6} />
+        <ProgressBar step={step} totalSteps={totalSteps} />
       </div>
     </main>
   );
