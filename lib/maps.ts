@@ -2,15 +2,20 @@
 //
 // Google Maps entegrasyonu için servis katmanı.
 //
-// Bu dosya ileride Google Distance Matrix API'ye bağlanacak temiz bir
-// arayüz sağlar. Şu an için GERÇEK AĞ ÇAĞRISI YAPILMAZ: `getDistance()`
-// çağrıldığında `MapsNotImplementedError` fırlatılır.
+// `GoogleMapsProvider` artık gerçek Google Distance Matrix API'sine
+// bağlanır (bkz. Sprint 15). `MockMapsProvider` test/geliştirme amacıyla
+// aynen korunuyor — `getMapsService()`/`setMapsServiceForTesting()`
+// factory'si sayesinde ikisi arasında geçiş, bu dosyanın dışında hiçbir
+// değişiklik gerektirmez.
 //
-// Bağlamak için ileride yapılacaklar:
-// 1. `.env.local` dosyasına GOOGLE_MAPS_API_KEY değerini gir.
-// 2. `GoogleMapsProvider.getDistance` içindeki yorumlu bloğu aktif et
-//    (fetch çağrısı + `parseDistanceMatrixResponse`).
-// 3. Geri kalan kod (config okuma, hata tipleri, factory) değişmeden kalır.
+// ÖNEMLİ: Bu dosya yalnızca SUNUCU tarafında (`app/api/distance/route.ts`
+// gibi bir Route Handler içinden) çağrılmalıdır. `GOOGLE_MAPS_API_KEY`
+// `NEXT_PUBLIC_` önekine sahip olmadığı için (bilinçli bir güvenlik
+// tercihi — anahtar tarayıcıya asla sızmamalı), bu modül bir client
+// component'ten ("use client") doğrudan import edilip çağrılırsa
+// `process.env.GOOGLE_MAPS_API_KEY` tarayıcıda her zaman `undefined` olur
+// ve `getMapsConfig()` gerçek bir anahtar girilmiş olsa bile sürekli
+// `MapsConfigError` fırlatır.
 
 // ---------------------------------------------------------------------------
 // Types
@@ -23,6 +28,8 @@ export interface DistanceRequest {
   origin: string;
   destination: string;
   unit?: DistanceUnit;
+  /** true ise Google'dan otoyollardan kaçınan bir rota istenir. */
+  avoidTolls?: boolean;
 }
 
 export interface DistanceResult {
@@ -104,36 +111,40 @@ export interface MapsProvider {
 }
 
 // ---------------------------------------------------------------------------
-// Google implementation (henüz stub — gerçek çağrı yapmıyor)
+// Google implementation — gerçek Distance Matrix çağrısı
 // ---------------------------------------------------------------------------
 
-class GoogleMapsProvider implements MapsProvider {
+export class GoogleMapsProvider implements MapsProvider {
   async getDistance(request: DistanceRequest): Promise<DistanceResult> {
-    // `request` gerçek entegrasyon aktif olduğunda buildDistanceMatrixUrl'e
-    // geçilecek; stub aşamasında sadece imzayı netleştirmek için duruyor.
-    void request;
+    const config = getMapsConfig();
+    const url = buildDistanceMatrixUrl(request, config);
 
-    // Anahtar eksikse burada erken ve net bir hata alırız; ama yine de
-    // ağ çağrısı yapmayız (henüz kasıtlı olarak devre dışı).
-    getMapsConfig();
+    let response: Response;
+    try {
+      response = await fetch(url);
+    } catch (error) {
+      throw new MapsApiError(
+        `Google Maps API'sine ulaşılamadı: ${
+          error instanceof Error ? error.message : "bilinmeyen ağ hatası"
+        }`
+      );
+    }
 
-    // TODO: Gerçek entegrasyon aktif edildiğinde burası şu şekilde olacak:
-    //
-    // const config = getMapsConfig();
-    // const url = buildDistanceMatrixUrl(request, config);
-    // const response = await fetch(url);
-    //
-    // if (!response.ok) {
-    //   throw new MapsApiError(
-    //     `Google Maps API hatası: ${response.status}`,
-    //     response.status
-    //   );
-    // }
-    //
-    // const data = await response.json();
-    // return parseDistanceMatrixResponse(data, request);
+    if (!response.ok) {
+      throw new MapsApiError(
+        `Google Maps API hatası: ${response.status}`,
+        response.status
+      );
+    }
 
-    throw new MapsNotImplementedError();
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      throw new MapsApiError("Google Maps API yanıtı okunamadı (geçersiz JSON).");
+    }
+
+    return parseDistanceMatrixResponse(data, request);
   }
 }
 
@@ -149,9 +160,14 @@ export function buildDistanceMatrixUrl(
     origins: request.origin,
     destinations: request.destination,
     units: request.unit ?? "metric",
+    mode: "driving",
     language: "tr",
     key: config.apiKey,
   });
+
+  if (request.avoidTolls) {
+    params.set("avoid", "tolls");
+  }
 
   return `${config.baseUrl}/distancematrix/json?${params.toString()}`;
 }
@@ -160,37 +176,79 @@ export function buildDistanceMatrixUrl(
 // Response parser — Google'ın gerçek JSON şekli netleşince doldurulacak
 // ---------------------------------------------------------------------------
 
+interface DistanceMatrixElement {
+  status: string;
+  distance?: { value: number; text: string };
+  duration?: { value: number; text: string };
+}
+
+interface DistanceMatrixRow {
+  elements: DistanceMatrixElement[];
+}
+
+interface DistanceMatrixResponseShape {
+  status: string;
+  rows: DistanceMatrixRow[];
+  error_message?: string;
+}
+
+function isDistanceMatrixResponse(
+  data: unknown
+): data is DistanceMatrixResponseShape {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "status" in data &&
+    "rows" in data
+  );
+}
+
 export function parseDistanceMatrixResponse(
-  // Gerçek entegrasyonda Google Distance Matrix response tipiyle değişecek.
   data: unknown,
   request: DistanceRequest
 ): DistanceResult {
-  void data;
-  void request;
+  if (!isDistanceMatrixResponse(data)) {
+    throw new MapsApiError("Google Maps API yanıtı beklenen şekilde değil.");
+  }
 
-  // TODO: `data.rows[0].elements[0]` içinden distance/duration çıkar.
-  throw new MapsNotImplementedError(
-    "parseDistanceMatrixResponse henüz implement edilmedi."
-  );
+  if (data.status !== "OK") {
+    throw new MapsApiError(
+      `Google Maps API hatası: ${data.status}${
+        data.error_message ? ` (${data.error_message})` : ""
+      }`
+    );
+  }
 
-  // Beklenen dönüş şekli (referans için):
-  // return {
-  //   origin: request.origin,
-  //   destination: request.destination,
-  //   distanceMeters: element.distance.value,
-  //   distanceText: element.distance.text,
-  //   durationSeconds: element.duration.value,
-  //   durationText: element.duration.text,
-  //   isMocked: false,
-  // };
+  const element = data.rows[0]?.elements[0];
+
+  if (!element) {
+    throw new MapsApiError("Google Maps API yanıtında sonuç bulunamadı.");
+  }
+
+  if (element.status !== "OK" || !element.distance || !element.duration) {
+    throw new MapsApiError(
+      `Rota bulunamadı: ${element.status} (${request.origin} → ${request.destination})`
+    );
+  }
+
+  return {
+    origin: request.origin,
+    destination: request.destination,
+    distanceMeters: element.distance.value,
+    distanceText: element.distance.text,
+    durationSeconds: element.duration.value,
+    durationText: element.duration.text,
+    isMocked: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Mock provider — gerçek API bağlanana kadar calculator akışını besler
+// Mock provider — test/geliştirme amacıyla korunur
 // ---------------------------------------------------------------------------
 //
-// `app/calculator/page.tsx` şu an bu sınıfı doğrudan kullanıyor (bkz. o
-// dosyadaki TODO). Gerçekçi bir demo/geliştirme deneyimi için 0 yerine,
+// `app/api/distance/route.ts`, `GOOGLE_MAPS_API_KEY` tanımlı değilken ve
+// yalnızca development ortamındayken bu sınıfı kullanır (bkz. o dosyadaki
+// fallback mantığı). Gerçekçi bir demo/geliştirme deneyimi için 0 yerine,
 // şehir çiftine göre deterministik (her zaman aynı iki şehir için aynı
 // sonucu veren) bir mesafe üretir ve gerçek bir ağ çağrısını simüle etmek
 // için kısa bir gecikme ekler.
@@ -250,11 +308,10 @@ export class MockMapsProvider implements MapsProvider {
 let cachedProvider: MapsProvider | null = null;
 
 /**
- * Uygulamanın kullanacağı tek Maps servis örneğini döndürür.
+ * Uygulamanın kullanacağı tek Maps servis örneğini döndürür (`GoogleMapsProvider`).
  *
- * Gerçek API bağlandığında bu fonksiyonun çağrıldığı yerlerde HİÇBİR
- * değişiklik gerekmez; sadece `GoogleMapsProvider` içindeki TODO'lar
- * doldurulur.
+ * Yalnızca sunucu tarafında çağrılmalıdır (bkz. dosya başı not) —
+ * `app/api/distance/route.ts` içinden kullanılır.
  */
 export function getMapsService(): MapsProvider {
   if (!cachedProvider) {

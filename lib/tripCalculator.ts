@@ -48,6 +48,12 @@ export interface TripCalculationInput {
   transportType?: TransportType;
   /** true ise mesafe/HGS otomatik gidiş-dönüş olarak hesaplanır. */
   roundTrip?: boolean;
+  /**
+   * true ise kullanıcı "Otoyollardan Kaçın" tercihini seçmiştir; bu durumda
+   * mock HGS (toll) kalemi sıfırlanır. Verilmezse geriye dönük uyumluluk
+   * için HGS her zamanki gibi mesafeye göre hesaplanır (davranış değişmez).
+   */
+  avoidTolls?: boolean;
   /** Kişi sayısı (otel/yemek/aktivite mock hesaplarında kullanılır). */
   people: number;
   /** Gün sayısı (otel/yemek/aktivite mock hesaplarında kullanılır). */
@@ -105,7 +111,16 @@ function calculateMockActivitiesCost(people: number, days: number): number {
   return round2(people * days * MOCK_ACTIVITY_PRICE_PER_PERSON_PER_DAY);
 }
 
-function calculateMockTollCost(distanceKm: number, roundTrip?: boolean): number {
+function calculateMockTollCost(
+  distanceKm: number,
+  roundTrip?: boolean,
+  avoidTolls?: boolean
+): number {
+  // Kullanıcı otoyollardan kaçınmayı seçtiyse HGS gideri anlamsızdır.
+  if (avoidTolls) {
+    return 0;
+  }
+
   const totalDistanceKm = roundTrip ? distanceKm * 2 : distanceKm;
   return round2(totalDistanceKm * MOCK_TOLL_PRICE_PER_KM);
 }
@@ -201,7 +216,20 @@ export function calculateTrip(
   const hotel = calculateMockHotelCost(input.people, input.days);
   const food = calculateMockFoodCost(input.people, input.days);
   const activities = calculateMockActivitiesCost(input.people, input.days);
-  const toll = calculateMockTollCost(input.distanceKm, input.roundTrip);
+
+  const rawToll = calculateMockTollCost(
+    input.distanceKm,
+    input.roundTrip,
+    input.avoidTolls
+  );
+
+  // Kendi aracıyla gidilmiyorsa (uçak/otobüs/tren) HGS gideri de
+  // anlamsızdır — fuel ile birebir simetrik davranış. Önceden yalnızca
+  // fuel sıfırlanıyordu; toll transportType'tan tamamen bağımsız
+  // hesaplanıyordu, bu yüzden uçak/otobüs/tren seçildiğinde bile mesafeye
+  // bağlı, hayalet bir HGS gideri sonuca dahil oluyordu. Bu düzeltmeyle
+  // toll da fuel gibi yalnızca "car" için hesaba katılıyor.
+  const toll = transportType === "car" ? rawToll : 0;
 
   const breakdown: TripCostBreakdown = {
     fuel,

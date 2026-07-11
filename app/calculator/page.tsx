@@ -5,14 +5,17 @@ import ProgressBar from "../../components/ProgressBar";
 import CitySearchInput from "../../components/CitySearchInput";
 import VehicleSelector from "../../components/VehicleSelector";
 import TripResultSummary from "../../components/TripResultSummary";
-import { calculateTrip } from "../../lib/tripCalculator";
+import RouteComparisonMap from "../../components/routeComparison/RouteComparisonMap";
+import RouteOptionCard from "../../components/routeComparison/RouteOptionCard";
+import RouteComparisonSummary from "../../components/routeComparison/RouteComparisonSummary";
+import RouteComparisonToggle, {
+  type RouteHighlight,
+} from "../../components/routeComparison/RouteComparisonToggle";
+import { calculateTrip, type TransportType } from "../../lib/tripCalculator";
 import type { FuelType } from "../../lib/costs";
 import { getVehicleById } from "../../lib/vehicles";
-// TODO: Gerçek Google Maps entegrasyonu bağlandığında `MockMapsProvider`
-// yerine `lib/maps.ts`'teki `getMapsService()` (GoogleMapsProvider) kullanılacak.
-// `MapsProvider` arayüzü aynı kaldığı için aşağıdaki `fetchDistance` mantığının
-// değişmesi gerekmeyecek.
-import { MockMapsProvider } from "../../lib/maps";
+import { buildRouteComparisonWithCosts } from "../../lib/maps/routeComparison/compareRoutes";
+import type { RouteComparisonResult } from "../../lib/maps/routeComparison/routeComparisonTypes";
 
 const cities = [
   "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Amasya",
@@ -53,11 +56,21 @@ function filterCities(cityList: string[], query: string) {
 // TODO: Araç seçilmediğinde kullanılacak varsayılan yakıt tipi.
 const MOCK_FUEL_TYPE: FuelType = "gasoline";
 
-const mapsProvider = new MockMapsProvider();
+// Beklenen `/api/distance` başarı yanıtı şekli (bkz. app/api/distance/route.ts).
+interface DistanceApiResponse {
+  distanceMeters: number;
+}
 
 // Adım sırası, ulaşım türüne göre değişir: "car" seçilirse "vehicle" adımı
 // devreye girer, aksi halde tamamen atlanır. Bu sayede step numaraları
 // sabit kalmak zorunda kalmadan akış dinamik olarak kurulur.
+//
+// NOT: Eskiden burada ayrı bir "tollPreference" (Otoyol Tercihi) adımı
+// vardı — kullanıcı sonucu görmeden önden "kullan/kaçın" seçiyordu. Bu
+// adım, Akıllı Rota Karşılaştırması özelliğiyle KALDIRILDI (bkz.
+// docs/feature-akilli-rota-karsilastirmasi.md Bölüm 1.1, onaylanan ürün
+// kararı): artık kullanıcı bu kararı, sonuç ekranında iki rotayı da
+// maliyet/süre farkıyla görerek veriyor.
 type StepKey =
   | "fromCity"
   | "toCity"
@@ -84,6 +97,7 @@ export default function CalculatorPage() {
   const [toCity, setToCity] = useState("");
   const [transport, setTransport] = useState("");
   const [vehicleId, setVehicleId] = useState("");
+  const [roundTrip, setRoundTrip] = useState(false);
   const [people, setPeople] = useState(2);
   const [days, setDays] = useState(5);
   const [fromCitySearch, setFromCitySearch] = useState("");
@@ -91,6 +105,19 @@ export default function CalculatorPage() {
   const [distanceKm, setDistanceKm] = useState<number | null>(null);
   const [isDistanceLoading, setIsDistanceLoading] = useState(false);
   const [distanceError, setDistanceError] = useState<string | null>(null);
+
+  // Akıllı Rota Karşılaştırması (yalnızca "Kendi Aracım" için) — ham rota
+  // geometrisi (mesafe/süre, iki senaryo) burada tutulur; maliyet hesabı
+  // (routeComparisonWithCosts) ayrı bir useMemo'da, saf bir fonksiyonla
+  // yapılır (bkz. lib/maps/routeComparison/compareRoutes.ts dosya başı notu).
+  const [routeComparisonRaw, setRouteComparisonRaw] =
+    useState<RouteComparisonResult | null>(null);
+  const [isRouteComparisonLoading, setIsRouteComparisonLoading] = useState(false);
+  const [routeComparisonError, setRouteComparisonError] = useState<string | null>(
+    null
+  );
+  const [selectedRouteType, setSelectedRouteType] =
+    useState<RouteHighlight>("withTolls");
 
   const stepSequence = useMemo(() => getStepSequence(transport), [transport]);
   const totalSteps = stepSequence.length;
@@ -110,26 +137,115 @@ export default function CalculatorPage() {
     setIsDistanceLoading(false);
   }, []);
 
-  const fetchDistance = useCallback(async (origin: string, destination: string) => {
-    const requestId = ++distanceRequestId.current;
-    setIsDistanceLoading(true);
-    setDistanceError(null);
-    setDistanceKm(null);
+  // Mesafe artık doğrudan bir Maps provider'ı değil, sunucu tarafı
+  // `/api/distance` route'unu çağırır (bkz. docs/sprint-15-technical-plan.md
+  // Bölüm 1.3 — GOOGLE_MAPS_API_KEY tarayıcıda okunamadığı için bu çağrı
+  // sunucuya taşındı).
+  const fetchDistance = useCallback(
+    async (
+      origin: string,
+      destination: string,
+      options?: { avoidTolls?: boolean }
+    ) => {
+      const requestId = ++distanceRequestId.current;
+      setIsDistanceLoading(true);
+      setDistanceError(null);
+      setDistanceKm(null);
 
-    try {
-      const result = await mapsProvider.getDistance({ origin, destination });
-      if (distanceRequestId.current !== requestId) return;
-      setDistanceKm(Math.round(result.distanceMeters / 1000));
-    } catch {
-      if (distanceRequestId.current !== requestId) return;
-      setDistanceError("Mesafe hesaplanamadı. Lütfen tekrar deneyin.");
-    } finally {
-      if (distanceRequestId.current === requestId) {
-        setIsDistanceLoading(false);
+      try {
+        const response = await fetch("/api/distance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            origin,
+            destination,
+            avoidTolls: options?.avoidTolls ?? false,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error("Mesafe isteği başarısız oldu.");
+        }
+
+        const result: DistanceApiResponse = await response.json();
+
+        if (distanceRequestId.current !== requestId) return;
+        setDistanceKm(Math.round(result.distanceMeters / 1000));
+      } catch {
+        if (distanceRequestId.current !== requestId) return;
+        setDistanceError("Mesafe hesaplanamadı. Lütfen tekrar deneyin.");
+      } finally {
+        if (distanceRequestId.current === requestId) {
+          setIsDistanceLoading(false);
+        }
       }
-    }
+    },
+    []
+  );
+
+  // Rota karşılaştırması, "vehicle" adımından çıkılırken (yalnızca "car")
+  // tetiklenir ve kullanıcı "Kişi Sayısı"/"Gün Sayısı" adımlarından
+  // geçerken arka planda tamamlanır (bkz. docs/feature-akilli-rota-karsilastirmasi.md
+  // Bölüm 3.1'deki aynı desen). Kendi request-id sayacı, `fetchDistance` ile
+  // aynı stale-response koruması sağlar.
+  const routeComparisonRequestId = useRef(0);
+
+  const invalidateRouteComparison = useCallback(() => {
+    routeComparisonRequestId.current += 1;
+    setRouteComparisonRaw(null);
+    setRouteComparisonError(null);
+    setIsRouteComparisonLoading(false);
+    setSelectedRouteType("withTolls");
   }, []);
 
+  const fetchRouteComparison = useCallback(
+    async (origin: string, destination: string) => {
+      const requestId = ++routeComparisonRequestId.current;
+      setIsRouteComparisonLoading(true);
+      setRouteComparisonError(null);
+      setRouteComparisonRaw(null);
+
+      try {
+        const response = await fetch("/api/route-comparison", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ origin, destination }),
+        });
+
+        if (!response.ok) {
+          throw new Error("Rota karşılaştırma isteği başarısız oldu.");
+        }
+
+        const result: RouteComparisonResult = await response.json();
+
+        if (routeComparisonRequestId.current !== requestId) return;
+        setRouteComparisonRaw(result);
+      } catch {
+        if (routeComparisonRequestId.current !== requestId) return;
+        setRouteComparisonError(
+          "Rotalar karşılaştırılamadı. Lütfen tekrar deneyin."
+        );
+      } finally {
+        if (routeComparisonRequestId.current === requestId) {
+          setIsRouteComparisonLoading(false);
+        }
+      }
+    },
+    []
+  );
+
+  // Yalnızca ulaşım tipi "diğer" (uçak/otobüs/tren) olduğunda kullanılır;
+  // "car" için sonuç ekranı routeComparisonWithCosts'tan seçilen rotayı
+  // kullanır (bkz. aşağıdaki useMemo).
+  //
+  // ÖNEMLİ DÜZELTME: `transportType` daha önce burada hiç geçilmiyordu, bu
+  // yüzden calculateTrip içeride her zaman varsayılan "car" kabul ediyordu.
+  // Sonuç: uçak/otobüs/tren seçildiğinde yakıt UI'da metinle gizleniyordu
+  // ("Yakıt hesaplanmadı") ama gerçek sayı hâlâ hesaplanıyordu; HGS ise hiç
+  // gizlenmiyordu ve mesafeye bağlı, hayalet bir gider olarak sonuca
+  // yansıyordu. `transportType`'ın artık burada geçilmesi ve
+  // lib/tripCalculator.ts'teki simetrik toll-sıfırlama düzeltmesiyle
+  // birlikte, uçak/otobüs/tren için hem yakıt hem HGS gerçekten sıfırlanır.
   const trip = useMemo(() => {
     if (distanceKm === null) {
       return null;
@@ -141,8 +257,29 @@ export default function CalculatorPage() {
       people,
       days,
       vehicleId: transport === "car" && vehicleId ? vehicleId : undefined,
+      roundTrip,
+      transportType: (transport || "car") as TransportType,
     });
-  }, [distanceKm, people, days, transport, vehicleId]);
+  }, [distanceKm, people, days, transport, vehicleId, roundTrip]);
+
+  // Ham rota geometrisi + güncel people/days/roundTrip/vehicleId'yi
+  // birleştirip her iki rotanın tam maliyetini hesaplar. Saf bir
+  // fonksiyon olduğu için (ağ çağrısı yapmaz) burada doğrudan çağrılabilir.
+  const routeComparisonWithCosts = useMemo(() => {
+    if (!routeComparisonRaw) {
+      return null;
+    }
+
+    return buildRouteComparisonWithCosts(routeComparisonRaw, {
+      fromCity,
+      toCity,
+      people,
+      days,
+      roundTrip,
+      vehicleId: vehicleId || undefined,
+      fuelType: MOCK_FUEL_TYPE,
+    });
+  }, [routeComparisonRaw, fromCity, toCity, people, days, roundTrip, vehicleId]);
 
   const filteredFromCities = useMemo(
     () => filterCities(cities, fromCitySearch),
@@ -174,10 +311,12 @@ export default function CalculatorPage() {
     setToCity("");
     setTransport("");
     setVehicleId("");
+    setRoundTrip(false);
     setPeople(2);
     setDays(5);
     invalidateDistance();
-  }, [invalidateDistance]);
+    invalidateRouteComparison();
+  }, [invalidateDistance, invalidateRouteComparison]);
 
   return (
     <main className="min-h-screen bg-slate-950 text-white flex items-center justify-center px-6">
@@ -208,11 +347,12 @@ export default function CalculatorPage() {
                     key={city}
                     onClick={() => {
                       setFromCity(city);
-                      // Başlangıç şehri değişince eski hedef/mesafe artık
-                      // geçersiz olabilir; kullanıcı hedefi yeniden seçince
-                      // fetchDistance tekrar tetiklenir.
+                      // Başlangıç şehri değişince eski hedef/mesafe/rota
+                      // karşılaştırması artık geçersiz olabilir; kullanıcı
+                      // hedefi yeniden seçince akış tekrar tetiklenir.
                       setToCity("");
                       invalidateDistance();
+                      invalidateRouteComparison();
                     }}
                     className={`rounded-xl border p-3 transition ${
                       fromCity === city
@@ -281,6 +421,16 @@ export default function CalculatorPage() {
               )}
             </div>
 
+            <label className="mt-4 flex items-center gap-3 rounded-xl border border-slate-700 bg-slate-800 p-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={roundTrip}
+                onChange={(e) => setRoundTrip(e.target.checked)}
+                className="h-5 w-5 accent-blue-600"
+              />
+              <span className="font-semibold">Gidiş-Dönüş</span>
+            </label>
+
             <button
               onClick={() => setStep((s) => s + 1)}
               disabled={!toCity}
@@ -307,6 +457,10 @@ export default function CalculatorPage() {
                     if (item.id !== "car") {
                       setVehicleId("");
                     }
+                    // Ulaşım tipi her değiştiğinde (car'a geçilse bile)
+                    // eski rota karşılaştırması geçersizdir; "vehicle"
+                    // adımından çıkılırken yeniden getirilecek.
+                    invalidateRouteComparison();
                   }}
                   className={`rounded-2xl border p-6 transition ${
                     transport === item.id
@@ -342,7 +496,14 @@ export default function CalculatorPage() {
             <VehicleSelector selectedVehicleId={vehicleId} onSelect={setVehicleId} />
 
             <button
-              onClick={() => setStep((s) => s + 1)}
+              onClick={() => {
+                setStep((s) => s + 1);
+                // Rota karşılaştırmasını burada, kullanıcı "Kişi Sayısı"/
+                // "Gün Sayısı" adımlarından geçerken arka planda başlatıyoruz
+                // (bkz. docs/feature-akilli-rota-karsilastirmasi.md Bölüm 3.1
+                // ile aynı erken-getirme deseni).
+                fetchRouteComparison(fromCity, toCity);
+              }}
               disabled={!vehicleId}
               className={`mt-8 w-full rounded-xl py-4 font-semibold text-lg transition ${
                 vehicleId ? "bg-blue-600 hover:bg-blue-700" : "bg-slate-700 cursor-not-allowed text-gray-400"
@@ -415,36 +576,127 @@ export default function CalculatorPage() {
 
         {currentStepKey === "result" && (
           <>
-            {isDistanceLoading && (
-              <div className="rounded-2xl bg-slate-800 p-6 text-center text-gray-400">
-                Mesafe hesaplanıyor...
-              </div>
-            )}
+            {transport === "car" ? (
+              <>
+                {isRouteComparisonLoading && (
+                  <div className="rounded-2xl bg-slate-800 p-6 text-center text-gray-400">
+                    Rotalar karşılaştırılıyor...
+                  </div>
+                )}
 
-            {!isDistanceLoading && distanceError && (
-              <div className="rounded-2xl bg-slate-800 border border-red-900 p-6">
-                <p className="text-red-400 font-semibold mb-3">{distanceError}</p>
-                <button
-                  onClick={() => fetchDistance(fromCity, toCity)}
-                  className="text-sm text-gray-300 hover:text-white transition underline"
-                >
-                  Tekrar dene
-                </button>
-              </div>
-            )}
+                {!isRouteComparisonLoading && routeComparisonError && (
+                  <div className="rounded-2xl bg-slate-800 border border-red-900 p-6">
+                    <p className="text-red-400 font-semibold mb-3">
+                      {routeComparisonError}
+                    </p>
+                    <button
+                      onClick={() => fetchRouteComparison(fromCity, toCity)}
+                      className="text-sm text-gray-300 hover:text-white transition underline"
+                    >
+                      Tekrar dene
+                    </button>
+                  </div>
+                )}
 
-            {!isDistanceLoading && !distanceError && trip && distanceKm !== null && (
-              <TripResultSummary
-                fromCity={fromCity}
-                toCity={toCity}
-                distanceKm={distanceKm}
-                isCar={transport === "car"}
-                transportLabel={selectedTransport?.label ?? ""}
-                transportIcon={selectedTransport?.emoji ?? ""}
-                vehicleLabel={vehicleLabel}
-                trip={trip}
-                onReset={handleReset}
-              />
+                {!isRouteComparisonLoading &&
+                  !routeComparisonError &&
+                  routeComparisonRaw &&
+                  routeComparisonWithCosts && (
+                    <div className="space-y-4">
+                      <h1 className="text-4xl font-bold mb-1">Seyahat Bütçen Hazır</h1>
+                      <p className="text-gray-400 mb-4">
+                        {fromCity} → {toCity}
+                      </p>
+
+                      <RouteComparisonToggle
+                        active={selectedRouteType}
+                        onChange={setSelectedRouteType}
+                      />
+
+                      <RouteComparisonMap
+                        withTollsPoints={routeComparisonRaw.withTolls.points}
+                        noTollsPoints={routeComparisonRaw.noTolls.points}
+                        highlighted={selectedRouteType}
+                      />
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <RouteOptionCard
+                          label="Otoyollu"
+                          icon="🔵"
+                          option={routeComparisonWithCosts.withTolls}
+                          isSelected={selectedRouteType === "withTolls"}
+                          onSelect={() => setSelectedRouteType("withTolls")}
+                        />
+                        <RouteOptionCard
+                          label="Otoyolsuz"
+                          icon="🟢"
+                          option={routeComparisonWithCosts.noTolls}
+                          isSelected={selectedRouteType === "noTolls"}
+                          onSelect={() => setSelectedRouteType("noTolls")}
+                        />
+                      </div>
+
+                      <RouteComparisonSummary
+                        comment={routeComparisonWithCosts.comment}
+                      />
+
+                      <TripResultSummary
+                        fromCity={fromCity}
+                        toCity={toCity}
+                        distanceKm={
+                          routeComparisonWithCosts[selectedRouteType].route.distanceKm
+                        }
+                        isCar={true}
+                        transportLabel={selectedTransport?.label ?? ""}
+                        transportIcon={selectedTransport?.emoji ?? ""}
+                        vehicleLabel={vehicleLabel}
+                        trip={routeComparisonWithCosts[selectedRouteType].trip}
+                        roundTrip={roundTrip}
+                        avoidTolls={selectedRouteType === "noTolls"}
+                        tollSource={routeComparisonWithCosts[selectedRouteType].tollSource}
+                        tollBreakdown={routeComparisonWithCosts[selectedRouteType].tollBreakdown}
+                        tollConfidence={routeComparisonWithCosts[selectedRouteType].tollConfidence}
+                        onReset={handleReset}
+                      />
+                    </div>
+                  )}
+              </>
+            ) : (
+              <>
+                {isDistanceLoading && (
+                  <div className="rounded-2xl bg-slate-800 p-6 text-center text-gray-400">
+                    Mesafe hesaplanıyor...
+                  </div>
+                )}
+
+                {!isDistanceLoading && distanceError && (
+                  <div className="rounded-2xl bg-slate-800 border border-red-900 p-6">
+                    <p className="text-red-400 font-semibold mb-3">{distanceError}</p>
+                    <button
+                      onClick={() => fetchDistance(fromCity, toCity)}
+                      className="text-sm text-gray-300 hover:text-white transition underline"
+                    >
+                      Tekrar dene
+                    </button>
+                  </div>
+                )}
+
+                {!isDistanceLoading && !distanceError && trip && distanceKm !== null && (
+                  <TripResultSummary
+                    fromCity={fromCity}
+                    toCity={toCity}
+                    distanceKm={distanceKm}
+                    isCar={false}
+                    transportLabel={selectedTransport?.label ?? ""}
+                    transportIcon={selectedTransport?.emoji ?? ""}
+                    vehicleLabel={null}
+                    trip={trip}
+                    roundTrip={roundTrip}
+                    avoidTolls={false}
+                    onReset={handleReset}
+                  />
+                )}
+              </>
             )}
           </>
         )}
