@@ -12,14 +12,18 @@
 // (React'ta bir useMemo içinden doğrudan çağrılabilir).
 //
 // calculateTrip, calculateFuelCost — hiçbiri değişmez ve tek çağrı noktası
-// olmaya devam eder. calculateMockTollCost (calculateTrip'in içinde),
-// yalnızca kürasyonlu HGS tablosunda (lib/tolls/) bu şehir çifti için bir
-// eşleşme YOKSA kullanılan bir fallback'tir; eşleşme varsa resmi rakam bu
-// dosya seviyesinde toll alanının üzerine yazılır.
+// olmaya devam eder. Bu dosya `calculateTrip`'i originCity/destinationCity
+// VERMEDEN çağırır (yalnızca kendi fromCity/toCity input'uyla Toll Engine'i
+// AYRICA sorgular), bu yüzden `calculateTrip`'in kendi içindeki toll
+// entegrasyonu burada devreye girmez — `calculateTrip` toll'u güvenli
+// şekilde 0 döner. Toll Engine bir rakam çözerse (status "verified" veya
+// "estimated") bu dosya seviyesinde toll alanının üzerine yazılır;
+// çözemezse (status "unavailable") `tollSource: "estimated"` ile 0 TL
+// döner (mesafe bazlı bir tahmin ÜRETİLMEZ).
 
 import { calculateTrip, type TripCalculationResult } from "../../tripCalculator";
 import type { FuelType } from "../../costs";
-import { getTollTariffService } from "../../tolls/tollTariffService";
+import { getTollProvider } from "../../tolls/tollProvider";
 import type { RouteComparisonResult, RouteOption } from "./routeComparisonTypes";
 
 export interface RouteCostInput {
@@ -40,21 +44,23 @@ export interface RouteOptionWithCost {
   tollSource: "official" | "estimated";
   /**
    * tollSource "official" ise köprü ücretinin otoyol ücretinden ayrı
-   * dökümü (bkz. lib/tolls/tollTariffMock.ts). "estimated" ise bu ayrım
-   * mevcut olmadığından undefined — UI tek bir "Otoyol" kalemi göstermeye
-   * devam eder. Gidiş-dönüş ise her iki alan da 2 ile çarpılmıştır.
+   * dökümü (Toll Engine segmentlerinden `facilityType` bazında türetilir —
+   * bkz. lib/tolls/tollData.ts). "estimated" ise bu ayrım mevcut
+   * olmadığından undefined — UI tek bir "Otoyol" kalemi göstermeye devam
+   * eder. Gidiş-dönüş ise Toll Engine'in kendi round-trip toplamına göre
+   * ölçeklenmiştir.
    */
   tollBreakdown?: {
     bridgeFee: number;
     highwayFee: number;
   };
   /**
-   * tollSource "official" ise bu rakamın güvenilirlik seviyesi (bkz.
-   * lib/tolls/tollTariffTypes.ts TollAsset.confidence). "verified":
-   * birincil bir kaynakla (ör. OTOYOL A.Ş. canlı hesaplayıcı) bizzat
-   * doğrulandı. "aggregator": yalnızca üçüncü parti bir toplayıcı siteden
-   * (ör. otoyoll.com) alındı, bu oturumda birincil kaynakla çapraz
-   * doğrulanmadı.
+   * tollSource "official" ise bu rakamın güvenilirlik seviyesi. "verified":
+   * Toll Engine sonucundaki TÜM segmentler resmi kaynaklı (bkz.
+   * lib/tolls/types.ts TollResultStatus). "aggregator": en az bir segment
+   * yalnızca üçüncü parti bir kaynaktan (ör. otoyoll.com) geldi ve/veya
+   * gidiş-dönüş simetrik varsayımla hesaplandı — bu oturumda birincil
+   * kaynakla çapraz doğrulanmadı.
    */
   tollConfidence?: "verified" | "aggregator";
 }
@@ -89,38 +95,57 @@ function buildOptionCost(
     avoidTolls: route.avoidTolls,
   });
 
-  // Yalnızca otoyollu senaryoda resmi tarife aranır (otoyolsuz zaten 0 TL).
-  if (!route.avoidTolls) {
-    const tariff = getTollTariffService().getTariff({
-      fromCity: input.fromCity,
-      toCity: input.toCity,
-    });
-
-    if (tariff) {
-      const multiplier = input.roundTrip ? 2 : 1;
-      const officialToll = round2(tariff.corridor.carPriceOneWay * multiplier);
-      const adjustedTotal = round2(
-        trip.totalCost - trip.breakdown.toll + officialToll
-      );
-
-      return {
-        route,
-        trip: {
-          ...trip,
-          breakdown: { ...trip.breakdown, toll: officialToll },
-          totalCost: adjustedTotal,
-        },
-        tollSource: "official",
-        tollBreakdown: {
-          bridgeFee: round2(tariff.corridor.bridgeFee * multiplier),
-          highwayFee: round2(tariff.corridor.highwayFee * multiplier),
-        },
-        tollConfidence: tariff.corridor.confidence,
-      };
-    }
+  // Yalnızca otoyollu senaryoda Toll Engine sorgulanır (otoyolsuz zaten 0 TL).
+  if (route.avoidTolls) {
+    return { route, trip, tollSource: "estimated" };
   }
 
-  return { route, trip, tollSource: "estimated" };
+  const result = getTollProvider().calculate({
+    originCity: input.fromCity,
+    destinationCity: input.toCity,
+    // Rotaly şu an yalnızca otomobil (KGM 1. sınıf) hesaplıyor; UI'da bir
+    // araç sınıfı seçici yok, bu yüzden burada da yeni bir seçenek eklenmedi.
+    vehicleClass: 1,
+    roundTrip: input.roundTrip,
+  });
+
+  if (result.total === null) {
+    // status "unavailable": rota desteklenmiyor veya araç sınıfı verisi
+    // yok. Mesafe bazlı bir tahmin ÜRETİLMEZ — toll, calculateTrip'in
+    // güvenli 0 fallback'inde kalır.
+    return { route, trip, tollSource: "estimated" };
+  }
+
+  const adjustedTotal = round2(
+    trip.totalCost - trip.breakdown.toll + result.total
+  );
+
+  // Köprü/otoyol ayrımı: segmentler her zaman GİDİŞ yönünün tek yön
+  // fiyatlarını taşır (bkz. lib/tolls/types.ts TollCalculationResult),
+  // `result.total` ise round-trip'te bunun katı/toplamı olabilir. Oranı
+  // tek yön toplamından türetip `result.total`'a ölçekliyoruz.
+  const oneWayBridge = round2(
+    result.segments
+      .filter((segment) => segment.facilityType === "bridge")
+      .reduce((sum, segment) => sum + segment.price, 0)
+  );
+  const oneWayHighway = round2(result.oneWayTotal - oneWayBridge);
+  const scale = result.oneWayTotal > 0 ? result.total / result.oneWayTotal : 1;
+
+  return {
+    route,
+    trip: {
+      ...trip,
+      breakdown: { ...trip.breakdown, toll: result.total },
+      totalCost: adjustedTotal,
+    },
+    tollSource: "official",
+    tollBreakdown: {
+      bridgeFee: round2(oneWayBridge * scale),
+      highwayFee: round2(oneWayHighway * scale),
+    },
+    tollConfidence: result.status === "verified" ? "verified" : "aggregator",
+  };
 }
 
 function formatDuration(totalMinutes: number): string {
