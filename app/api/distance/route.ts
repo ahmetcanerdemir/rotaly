@@ -2,16 +2,17 @@
 //
 // Mesafe hesaplama için sunucu tarafı Route Handler.
 //
-// NEDEN BU DOSYA VAR (bkz. docs/sprint-15-technical-plan.md Bölüm 1.3):
-// `app/calculator/page.tsx` bir client component'tir ve `GOOGLE_MAPS_API_KEY`
-// `NEXT_PUBLIC_` önekine sahip olmadığı için (anahtarı tarayıcıya sızdırmamak
-// amacıyla bilinçli bir tercih) tarayıcıda asla okunamaz. Bu yüzden gerçek
-// Google Maps çağrısı burada, sunucuda yapılır; `page.tsx` yalnızca bu
-// route'a `fetch` ile istek atar.
+// GÜVENLİK NEDENİ: `app/calculator/page.tsx` bir client component'tir ve
+// `GOOGLE_MAPS_API_KEY` `NEXT_PUBLIC_` önekine sahip olmadığı için (anahtarı
+// tarayıcıya sızdırmamak amacıyla bilinçli bir tercih) tarayıcıda asla
+// okunamaz. Bu yüzden gerçek Google Maps çağrısı burada, sunucuda yapılır;
+// `page.tsx` yalnızca bu route'a `fetch` ile istek atar.
 //
-// Bu route ayrıca Sprint 15'te onaylanan geliştirme fallback kararının tek
-// uygulama noktasıdır: `GOOGLE_MAPS_API_KEY` tanımlı değilse ve production
-// dışındaysak otomatik olarak `MockMapsProvider`'a düşülür.
+// Development fallback: `GOOGLE_MAPS_API_KEY` tanımlı değilse ve production
+// dışındaysak `MockMapsProvider`'a düşülür. Production'da anahtar yoksa
+// asla mock'a düşülmez; hata mesajında da anahtarın eksik olduğu
+// belirtilmez (client'a bilgi sızdırmamak için) — teknik detay yalnızca
+// sunucu logunda tutulur.
 
 import { NextResponse } from "next/server";
 import {
@@ -34,13 +35,7 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-/**
- * Hangi Maps sağlayıcısının kullanılacağına karar verir.
- *
- * Geliştirme ortamında `GOOGLE_MAPS_API_KEY` yoksa `MockMapsProvider`
- * kullanılır (Sprint 15, "geliştirme için mock'a otomatik düşsün" kararı).
- * Aksi halde `getMapsService()` (→ gerçek `GoogleMapsProvider`) kullanılır.
- */
+/** Development'ta anahtar yoksa mock'a düşer; aksi halde gerçek servis. */
 function resolveProvider(): MapsProvider {
   const hasApiKey = Boolean(process.env.GOOGLE_MAPS_API_KEY);
 
@@ -73,8 +68,8 @@ export async function POST(request: Request) {
   }
 
   const distanceRequest: DistanceRequest = {
-    origin,
-    destination,
+    origin: origin.trim(),
+    destination: destination.trim(),
     avoidTolls: avoidTolls === true,
   };
 
@@ -84,7 +79,13 @@ export async function POST(request: Request) {
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof MapsConfigError) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      // Teknik detay (ör. eksik API anahtarı) yalnızca sunucu logunda
+      // tutulur; client'a bu bilgi asla sızdırılmaz.
+      console.error("MapsConfigError:", error.message);
+      return NextResponse.json(
+        { error: "Mesafe hesaplama servisi şu anda kullanılamıyor." },
+        { status: 500 }
+      );
     }
     if (error instanceof MapsApiError) {
       return NextResponse.json({ error: error.message }, { status: 502 });
@@ -92,6 +93,7 @@ export async function POST(request: Request) {
     if (error instanceof MapsNotImplementedError) {
       return NextResponse.json({ error: error.message }, { status: 501 });
     }
+    console.error("Beklenmeyen /api/distance hatası:", error);
     return NextResponse.json(
       { error: "Mesafe hesaplanırken beklenmeyen bir hata oluştu." },
       { status: 500 }
